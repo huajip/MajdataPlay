@@ -184,7 +184,7 @@ namespace MajdataPlay.Scenes.Login
                 if (!hadSession) return;
                 tail = _tail;
             }
-            try { tail.Wait(QuitFlushTimeout); } catch { }
+            try { tail.Wait((int)QuitFlushTimeout.TotalMilliseconds); } catch { } // Wait(TimeSpan) is stripped from the shipped mscorlib
         }
         public void Dispose()
         {
