@@ -788,6 +788,13 @@ namespace MajdataPlay.Net
             }
             return new EndpointResponse<UserSummary>(rsp);
         }
+        // Login Location, auth-id query and response body are short-lived secrets.
+        // Keep ordinary network diagnostics, but never render auth exchange data.
+        static bool IsAuthExchange(Uri uri) =>
+            uri.AbsolutePath.EndsWith("/" + API_POST_AUTH_REQUEST, StringComparison.Ordinal) ||
+            uri.AbsolutePath.EndsWith("/" + API_GET_AUTH_CHECK, StringComparison.Ordinal) ||
+            uri.AbsolutePath.EndsWith("/" + API_POST_AUTH_REVOKE, StringComparison.Ordinal);
+
         static async ValueTask<EndpointResponse> GetAsync(Uri uri, CancellationToken token = default)
         {
             try
@@ -808,7 +815,7 @@ namespace MajdataPlay.Net
                         Headers = rsp.Headers.ToDictionary(kv => kv.Key.ToLower(), kv => kv.Value),
                         Message = ""
                     };
-                    MajDebug.LogError($"[Online][GET] {uri} - Unsuccessful\n{epRsp}");
+                    MajDebug.LogError(IsAuthExchange(uri) ? "[Online][GET] Auth exchange Unsuccessful (redacted)" : $"[Online][GET] {uri} - Unsuccessful\n{epRsp}");
                     return epRsp;
                 }                
                 epRsp = new EndpointResponse(buffer, _defaultJsonSerializer, _defaultJsonSerializerSettings)
@@ -821,7 +828,7 @@ namespace MajdataPlay.Net
                     Headers = rsp.Headers.ToDictionary(kv => kv.Key.ToLower(), kv => kv.Value),
                     Message = "Ok"
                 };
-                MajDebug.LogDebug($"[Online][GET] {uri}\n{epRsp}");
+                MajDebug.LogDebug(IsAuthExchange(uri) ? "[Online][GET] Auth exchange completed (redacted)" : $"[Online][GET] {uri}\n{epRsp}");
                 return epRsp;
             }
             catch (OperationCanceledException)
@@ -830,11 +837,11 @@ namespace MajdataPlay.Net
                 if (token.IsCancellationRequested)
                 {
                     errorCode = HttpErrorCode.Canceled;
-                    MajDebug.LogError($"[Online][GET] {uri} - Canceled");
+                    MajDebug.LogError(IsAuthExchange(uri) ? "[Online][GET] Auth exchange Canceled (redacted)" : $"[Online][GET] {uri} - Canceled");
                 }
                 else
                 {
-                    MajDebug.LogError($"[Online][GET] {uri} - Timeout");
+                    MajDebug.LogError(IsAuthExchange(uri) ? "[Online][GET] Auth exchange Timeout (redacted)" : $"[Online][GET] {uri} - Timeout");
                 }
                 return new EndpointResponse(Array.Empty<byte>(), _defaultJsonSerializer, _defaultJsonSerializerSettings)
                 {
@@ -848,7 +855,7 @@ namespace MajdataPlay.Net
             }
             catch (Exception e)
             {
-                MajDebug.LogError($"[Online][GET] {uri} - Unknown Error\n{e}");
+                MajDebug.LogError(IsAuthExchange(uri) ? "[Online][GET] Auth exchange Unknown Error (redacted)" : $"[Online][GET] {uri} - Unknown Error\n{e}");
                 return new EndpointResponse(Array.Empty<byte>(), _defaultJsonSerializer, _defaultJsonSerializerSettings)
                 {
                     Endpoint = uri,
@@ -896,7 +903,7 @@ namespace MajdataPlay.Net
                         Headers = rsp.Headers.ToDictionary(kv => kv.Key.ToLower(), kv => kv.Value),
                         Message = ""
                     };
-                    MajDebug.LogError($"[Online][POST] {uri} - Unsuccessful\n{epRsp}");
+                    MajDebug.LogError(IsAuthExchange(uri) ? "[Online][POST] Auth exchange Unsuccessful (redacted)" : $"[Online][POST] {uri} - Unsuccessful\n{epRsp}");
                     return epRsp;
                 }
                 epRsp = new EndpointResponse(buffer, _defaultJsonSerializer, _defaultJsonSerializerSettings)
@@ -909,7 +916,7 @@ namespace MajdataPlay.Net
                     Headers = rsp.Headers.ToDictionary(kv => kv.Key.ToLower(), kv => kv.Value),
                     Message = "Ok"
                 };
-                MajDebug.LogDebug($"[Online][POST] {uri}\n{epRsp}");
+                MajDebug.LogDebug(IsAuthExchange(uri) ? "[Online][POST] Auth exchange completed (redacted)" : $"[Online][POST] {uri}\n{epRsp}");
                 return epRsp;
             }
             catch (OperationCanceledException)
@@ -918,11 +925,11 @@ namespace MajdataPlay.Net
                 if (token.IsCancellationRequested)
                 {
                     errorCode = HttpErrorCode.Canceled;
-                    MajDebug.LogError($"[Online][POST] {uri} - Canceled");
+                    MajDebug.LogError(IsAuthExchange(uri) ? "[Online][POST] Auth exchange Canceled (redacted)" : $"[Online][POST] {uri} - Canceled");
                 }
                 else
                 {
-                    MajDebug.LogError($"[Online][POST] {uri} - Timeout");
+                    MajDebug.LogError(IsAuthExchange(uri) ? "[Online][POST] Auth exchange Timeout (redacted)" : $"[Online][POST] {uri} - Timeout");
                 }
                 return new EndpointResponse(Array.Empty<byte>(), _defaultJsonSerializer, _defaultJsonSerializerSettings)
                 {
@@ -936,7 +943,7 @@ namespace MajdataPlay.Net
             }
             catch (Exception e)
             {
-                MajDebug.LogError($"[Online][POST] {uri} - Unknown Error\n{e}");
+                MajDebug.LogError(IsAuthExchange(uri) ? "[Online][POST] Auth exchange Unknown Error (redacted)" : $"[Online][POST] {uri} - Unknown Error\n{e}");
                 return new EndpointResponse(Array.Empty<byte>(), _defaultJsonSerializer, _defaultJsonSerializerSettings)
                 {
                     Endpoint = uri,

@@ -61,6 +61,8 @@ namespace MajdataPlay.Scenes.Login
         ApiEndpoint[] _apiEndpoints = Array.Empty<ApiEndpoint>();
         ApiEndpoint[] _enabledEndpoints = Array.Empty<ApiEndpoint>();
 
+        QrNfcPublisher? _nfcPublisher;
+        long _nfcCheckGeneration = -1;
         bool _isReady = false;
         bool _isExited = false;
         readonly static QRCodeGenerator _qrGenerator = new ();
@@ -68,6 +70,7 @@ namespace MajdataPlay.Scenes.Login
 
         void Awake()
         {
+            _nfcPublisher = QrNfcPublisher.CreateFromEnvironment();
             _apiEndpoints = MajEnv.ApiEndpoints;
             _qrCodeRawImage = _qrCodeComponent.GetComponent<RawImage>();
             using var rentedApiEndpoints = new PooledList<ApiEndpoint>();
@@ -90,8 +93,17 @@ namespace MajdataPlay.Scenes.Login
             UpdateClearButtons();
             LoginProcessor().Forget();
         }
+        void OnDisable()
+        {
+            _nfcPublisher?.Dispose();
+            _nfcPublisher = null;
+        }
+        void OnDestroy() => OnDisable();
+        void OnApplicationQuit() => OnDisable();
+
         void Update()
         {
+            _nfcPublisher?.Tick();
             if(!_isReady || _isExited)
             {
                 return;
@@ -146,6 +158,7 @@ namespace MajdataPlay.Scenes.Login
             var sceneSwitcher = MajInstances.SceneSwitcher;
             for (var i = 0; i < _enabledEndpoints.Length; i++)
             {
+                _nfcPublisher?.Clear();
                 var endpoint = _enabledEndpoints[i];
                 _loading.SetActive(false);
                 Hint();
@@ -201,6 +214,7 @@ namespace MajdataPlay.Scenes.Login
                                 _qrCodeLoading.SetActive(false);
                                 _qrCodeErrorIcon.SetActive(false);
                                 _qrCodeRawImage.color = Color.white;
+                                _nfcPublisher?.Publish(location);
 
                                 authProcessFlag = AUTH_FLAG_WAIT_FOR_PERMIT;
                             }
@@ -226,6 +240,7 @@ namespace MajdataPlay.Scenes.Login
                                     var rsp = task.Result;
                                     if (rsp.StatusCode is HttpStatusCode.OK)
                                     {
+                                        _nfcPublisher?.Clear();
                                         MajDebug.LogDebug("User has granted authorization");
                                         _loading.SetActive(true);
                                         _isReady = false;
@@ -251,12 +266,14 @@ namespace MajdataPlay.Scenes.Login
                                     }
                                     else if (rsp.StatusCode is HttpStatusCode.Accepted)
                                     {
+                                        _nfcPublisher?.ConfirmPending(_nfcCheckGeneration);
                                         // Still waiting for user to authorize
                                         authCheckTask = null;
                                         MajDebug.LogDebug("No user has granted authorization");
                                     }
                                     else if(rsp.StatusCode is HttpStatusCode.NotFound)
                                     {
+                                        _nfcPublisher?.Clear();
                                         MajDebug.LogDebug("The authorization session has expired.");
                                         isRefreshQRCodeRequested = true;
                                         authCheckTask = null;
@@ -272,6 +289,7 @@ namespace MajdataPlay.Scenes.Login
                             {
                                 if(authCheckCooldownSec < 0)
                                 {
+                                    _nfcCheckGeneration = _nfcPublisher?.BeginCheck() ?? -1;
                                     authCheckTask = Online.AuthCheckAsync(endpoint, authRequestId, cts.Token);
                                     authCheckCooldownSec = 2d;
                                     MajDebug.LogDebug("Checking the auth session");
@@ -285,6 +303,7 @@ namespace MajdataPlay.Scenes.Login
 
                         if (isRefreshQRCodeRequested && authProcessFlag is (AUTH_FLAG_WAIT_FOR_PERMIT or AUTH_FLAG_ERROR))
                         {
+                            _nfcPublisher?.Clear();
                             cts.Cancel();
                             cts = new();
                             authProcessFlag = AUTH_FLAG_REQUESTING;
@@ -302,6 +321,7 @@ namespace MajdataPlay.Scenes.Login
                         if (InputManager.IsSensorClickCompletedInThisFrame(SensorArea.A5) ||
                             InputManager.IsButtonClickCompletedInThisFrame(ButtonZone.A5))
                         {
+                            _nfcPublisher?.Clear();
                             cts.Cancel();
                             if (!string.IsNullOrEmpty(authRequestId))
                             {
@@ -370,6 +390,7 @@ namespace MajdataPlay.Scenes.Login
                             }
                             else
                             {
+                                _nfcPublisher?.Clear();
                                 MajDebug.LogInfo("Logged in");
                                 Hint("MAJTEXT_LOGIN_LOGIN_SUCCESS".i18n(), false);
                                 _loading.SetActive(true);
@@ -416,6 +437,7 @@ namespace MajdataPlay.Scenes.Login
             {
                 return;
             }
+            _nfcPublisher?.Clear();
             _isExited = true;
             RefreshListBackgroundAsync(refreshWholeList:SceneSwitcher.LastScene != MajScenes.Title);
         }
@@ -582,7 +604,7 @@ namespace MajdataPlay.Scenes.Login
             var e = default(Exception?);
             if (string.IsNullOrEmpty(location) || !rsp.TryDeserialize<AuthRequestResponse?>(out var authRsp, out e) || authRsp is null)
             {
-                MajDebug.LogError($"The server returned an invalid response\n{rsp}\nException: {e}");
+                MajDebug.LogError("The server returned an invalid auth response (redacted)");
                 throw _exception;
             }
             return (location, (AuthRequestResponse)authRsp);
