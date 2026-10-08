@@ -99,7 +99,11 @@ namespace MajdataPlay.Scenes.Login
             _nfcPublisher = null;
         }
         void OnDestroy() => OnDisable();
-        void OnApplicationQuit() => OnDisable();
+        void OnApplicationQuit()
+        {
+            _nfcPublisher?.DisposeAndFlush();
+            _nfcPublisher = null;
+        }
 
         void Update()
         {
@@ -221,6 +225,7 @@ namespace MajdataPlay.Scenes.Login
                             else if(authSessionTask.IsCompleted)// Faulted or canceled
                             {
                                 authProcessFlag = AUTH_FLAG_ERROR;
+                                _nfcPublisher?.Clear();
                                 _qrCodeErrorIcon.SetActive(true);
                                 _qrCodeLoading.SetActive(false);
                                 MajDebug.LogException(authSessionTask.AsTask().Exception);

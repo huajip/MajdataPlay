@@ -28,6 +28,12 @@ namespace MajdataPlay.Scenes.Login
         bool _deviceFault;
         bool _disposed;
         const int PendingProofSeconds = 8;
+        // The bridge answers publish only after the reader is armed (its own
+        // device budget is 4 s) and clear only after the worker is stopped.
+        // Short lease renewals stay short so a dead bridge never piles up work.
+        static readonly TimeSpan DeviceRequestTimeout = TimeSpan.FromSeconds(5);
+        static readonly TimeSpan LeaseRequestTimeout = TimeSpan.FromMilliseconds(1000);
+        static readonly TimeSpan QuitFlushTimeout = TimeSpan.FromMilliseconds(600);
 
         public static QrNfcPublisher CreateFromEnvironment()
         {
@@ -43,7 +49,8 @@ namespace MajdataPlay.Scenes.Login
         // without launching Unity or communicating with the real login server.
         internal QrNfcPublisher(HttpMessageHandler handler, Func<DateTime> now)
         {
-            _client = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(600) };
+            // Per-request deadlines are applied in EnqueueLocked.
+            _client = new HttpClient(handler) { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
             var origin = DateTime.UtcNow;
             var elapsed = Stopwatch.StartNew();
             _now = now ?? (() => origin + elapsed.Elapsed);
@@ -134,15 +141,29 @@ namespace MajdataPlay.Scenes.Login
                         application = "MajdataPlay", instance = _instance, session,
                         sequence, action, url, expiresAt
                     });
+                    var timeout = action is "publish" or "clear" ? DeviceRequestTimeout : LeaseRequestTimeout;
+                    using (var cts = new CancellationTokenSource(timeout))
                     using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
-                    using (var response = _client.PostAsync(BridgeUrl, content).GetAwaiter().GetResult())
+                    using (var response = _client.PostAsync(BridgeUrl, content, cts.Token).GetAwaiter().GetResult())
                     {
                         lock (_gate)
                         {
-                            if (generation != _generation || session != _session) return;
-                            if ((int)response.StatusCode == 503) _deviceFault = true;
-                            if ((int)response.StatusCode == 410 && action != "clear")
-                            { _generation++; _session = null; }
+                            if (action == "clear" || generation != _generation || session != _session) return;
+                            var status = (int)response.StatusCode;
+                            if (status == 503)
+                            {
+                                // Bridge device fault is sticky: stop renewing this
+                                // session; only a new QR may try again.
+                                _deviceFault = true;
+                                _generation++; _session = null;
+                            }
+                            else if (status == 410 || (status == 409 && action == "publish"))
+                            {
+                                // Session gone, or another owner still holds the
+                                // reader. Drop the session; the next server 202
+                                // for this same QR republishes with a new one.
+                                _generation++; _session = null;
+                            }
                         }
                     }
                 }
@@ -150,6 +171,21 @@ namespace MajdataPlay.Scenes.Login
             });
         }
         internal Task WhenIdleAsync() { lock (_gate) return _tail; }
+        // Application quit: give the final clear a short, bounded chance to
+        // reach the bridge so the reader is released at once instead of after
+        // the 8 s lease. Never blocks longer than QuitFlushTimeout.
+        public void DisposeAndFlush()
+        {
+            Task tail;
+            lock (_gate)
+            {
+                var hadSession = _session != null;
+                Dispose();
+                if (!hadSession) return;
+                tail = _tail;
+            }
+            try { tail.Wait(QuitFlushTimeout); } catch { }
+        }
         public void Dispose()
         {
             lock (_gate)
