@@ -1,0 +1,24 @@
+<Project>
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>../../../Temp/Pn532Login/obj/</BaseIntermediateOutputPath>
+    <OutputPath>../../../Temp/Pn532Login/bin/</OutputPath>
+  </PropertyGroup>
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>CS0649;CS0169;CS8632;CS1717;CS8602;CS8618</NoWarn>
+    <RestoreSources>$(MSBuildThisFileDirectory)</RestoreSources>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../../Assets/Scripts/Scenes/Login/QrNfcPublisher.cs" Link="Production/QrNfcPublisher.cs" />
+    <Compile Include="../../../Assets/Scripts/Scenes/Login/Pn532*.cs" Link="Production/%(Filename)%(Extension)" />
+    <Compile Include="../../../Assets/Scripts/Scenes/Login/LoginManager.cs" Link="Production/LoginManager.cs" />
+    <Reference Include="Newtonsoft.Json"><HintPath>$(MSBuildSDKsPath)/../Newtonsoft.Json.dll</HintPath></Reference>
+  </ItemGroup>
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+</Project>
