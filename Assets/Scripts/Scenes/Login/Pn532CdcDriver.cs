@@ -101,7 +101,7 @@ namespace MajdataPlay.Scenes.Login
             }
         }
         static void Wipe(byte[] bytes) { Array.Clear(bytes, 0, bytes.Length); }
-        public static void Run(IPn532Port port, byte[] ndef, Func<bool> live, CancellationToken stop, Action armed)
+        public static void Run(IPn532Port port, byte[] ndef, Func<bool> live, CancellationToken stop, Action armed, Action<string> diagnostic = null)
         {
             var driver = new Pn532CdcDriver(port, live, stop);
             try
@@ -119,6 +119,7 @@ namespace MajdataPlay.Scenes.Login
                     var activation = driver.Command(0x8C, target, true, armed);
                     bool isoDep = activation.Length != 0 && (activation[0] & 8) != 0; Wipe(activation);
                     if (!isoDep) continue;
+                    diagnostic?.Invoke("type4_activated");
                     using (var tag = new Pn532Type4(ndef))
                     while (live())
                     {
@@ -132,6 +133,7 @@ namespace MajdataPlay.Scenes.Login
                             reply = tag.Process(apdu); status = driver.Command(0x8E, reply);
                             if (status.Length == 0) throw new IOException("pn532_missing_status");
                             if (status[0] != 0) break;
+                            diagnostic?.Invoke("apdu_processed");
                         }
                         finally { Wipe(apdu); if (reply != null) Wipe(reply); if (status != null) Wipe(status); }
                     }

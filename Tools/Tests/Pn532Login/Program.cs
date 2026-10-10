@@ -21,7 +21,7 @@ static class Tests
         }
     }
     internal static QrNfcPublisher Publisher(FakePorts ports, FakeClock clock) =>
-        new QrNfcPublisher(ports.Open, () => clock.Now, "login.example", "/machine/authorize");
+        new QrNfcPublisher(ports.Open, () => clock.Now);
     static async Task Idle(QrNfcPublisher publisher, int milliseconds = 3000) =>
         await publisher.WhenIdleAsync().WaitAsync(TimeSpan.FromMilliseconds(milliseconds));
     static bool Released(FakePort port) => port.Closed && !port.Dtr &&
@@ -170,23 +170,40 @@ static class Tests
     {
         var oldEnable = Environment.GetEnvironmentVariable("MAJ_PN532_NFC");
         Environment.SetEnvironmentVariable("MAJ_PN532_NFC", null);
-        Check(QrNfcPublisher.CreateFromEnvironment() == null, "default-off mode creates no device client");
+        Check(Environment.OSVersion.Platform == PlatformID.Win32NT || QrNfcPublisher.CreateConfigured() == null, "non-Windows platforms do not create a CDC client");
         Environment.SetEnvironmentVariable("MAJ_PN532_NFC", oldEnable);
         Check(Pn532NativeCdc.IsPortName("COM7") && Pn532NativeCdc.IsPortName("COM123") &&
             !Pn532NativeCdc.IsPortName("COM0") && !Pn532NativeCdc.IsPortName("COM01") &&
             !Pn532NativeCdc.IsPortName("COM7\\device") && !Pn532NativeCdc.IsPortName("/dev/ttyUSB0"), "CDC configuration accepts only explicit Windows COM names");
         var ports = new FakePorts(); using var publisher = Publisher(ports, new FakeClock());
-        var invalid = new[] { Url.Replace("https:", "http:"), Url.Replace("login.example", "other.example"),
-            Url.Replace("login.example", "login.example.evil"), Url.Replace("login.example", "user@login.example"),
-            Url + "#fragment", Url + "&next=evil", Url + "%0A", Url + "\n", Url.Replace("authorize", "other"),
-            Url.Replace("login.example", "login.example:444"), Url.Replace("fake-1", ""), Url + new string('x', 1100) };
+        var invalid = new[] { "javascript:alert(1)", "file:///tmp/login", "not a URL",
+            Url.Replace("login.example", "user@login.example"), Url + "\n", Url + "\\path", Url + new string('x', 2100) };
         foreach (var url in invalid) publisher.Publish(url);
         await Idle(publisher);
-        Check(ports.Opened.Count == 0, "foreign domains, malformed and oversized login URLs never open a port");
+        Check(ports.Opened.Count == 0, "non-web schemes, credentials, malformed and oversized URLs never open a port");
+    }
+    static void Configuration()
+    {
+        var old = Newtonsoft.Json.JsonConvert.DeserializeObject<MajdataPlay.TestSettings>("{}");
+        Check(old.NFC.Enabled && old.NFC.Port == "", "old JSON defaults to enabled with automatic port selection");
+        var configured = Newtonsoft.Json.JsonConvert.DeserializeObject<MajdataPlay.TestSettings>("{\"NFC\":{\"Enabled\":false,\"Port\":\"COM7\"}}");
+        Check(!configured.NFC.Enabled && configured.NFC.Port == "COM7", "JSON supports explicit disable and a reader port");
+        Check(!Pn532NfcConfiguration.Enabled(configured.NFC, null), "JSON disable works without environment variables");
+        Check(!Pn532NfcConfiguration.Enabled(old.NFC, "0") && Pn532NfcConfiguration.Enabled(configured.NFC, "1"), "optional environment flags explicitly override JSON");
+        Check(Pn532NfcConfiguration.ResolvePort(null, new[]{"COM1"}) == "COM1", "one present compatible reader is selected automatically");
+        Check(Pn532NfcConfiguration.ResolvePort(null, Array.Empty<string>()) == null && Pn532NfcConfiguration.ResolvePort(null,new[]{"COM1","COM7"}) == null, "absent or multiple readers require a configured port");
+        Check(Pn532NfcConfiguration.ResolvePort("com7",null) == "COM7" && Pn532NfcConfiguration.ResolvePort("COM0",new[]{"COM1"}) == null, "explicit port is normalized and an invalid port does not fall back to another device");
+        var roundtrip=Newtonsoft.Json.JsonConvert.DeserializeObject<MajdataPlay.TestSettings>(Newtonsoft.Json.JsonConvert.SerializeObject(configured));
+        Check(!roundtrip.NFC.Enabled && roundtrip.NFC.Port == "COM7", "JSON save and reload preserve NFC configuration");
+        foreach(var url in new[]{"http://second.example:8080/authorize?ticket=test-only", "HTTPS://second.example/different/path#test-only"})
+        {
+            var ndef=Pn532Type4.UriRecord(url);var prefixes=new[]{"","http://www.","https://www.","http://","https://"};
+            Check(prefixes[ndef[4]]+Encoding.UTF8.GetString(ndef.Skip(5).ToArray()) == url, "NDEF preserves the displayed URL without domain or path rewriting");
+        }
     }
     public static async Task Main()
     {
-        Type4(); await Policy(); await Transport(); await Failures();
+        Type4(); Configuration(); await Policy(); await Transport(); await Failures();
         await LoginLifecycle.Run(Check);
         Console.WriteLine($"{_passed} checks passed; mock devices and server only.");
     }

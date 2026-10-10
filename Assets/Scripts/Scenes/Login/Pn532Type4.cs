@@ -65,7 +65,10 @@ namespace MajdataPlay.Scenes.Login
         }
         public static byte[] UriRecord(string uri)
         {
-            var text = Encoding.UTF8.GetBytes(uri.Substring(8));
+            byte prefix = 0; int prefixLength = 0;
+            if (uri.StartsWith("https://", StringComparison.Ordinal)) { prefix = 4; prefixLength = 8; }
+            else if (uri.StartsWith("http://", StringComparison.Ordinal)) { prefix = 3; prefixLength = 7; }
+            var text = Encoding.UTF8.GetBytes(uri.Substring(prefixLength));
             int length = text.Length + 1;
             bool shortRecord = length < 256;
             int header = shortRecord ? 5 : 8;
@@ -73,7 +76,7 @@ namespace MajdataPlay.Scenes.Login
             result[0] = shortRecord ? (byte)0xD1 : (byte)0xC1; result[1] = 1;
             if (shortRecord) result[2] = (byte)length;
             else { result[2] = (byte)(length >> 24); result[3] = (byte)(length >> 16); result[4] = (byte)(length >> 8); result[5] = (byte)length; }
-            result[header - 2] = 0x55; result[header - 1] = 4;
+            result[header - 2] = 0x55; result[header - 1] = prefix;
             Buffer.BlockCopy(text, 0, result, header, text.Length); Array.Clear(text, 0, text.Length);
             return result;
         }

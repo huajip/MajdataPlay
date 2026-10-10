@@ -69,7 +69,8 @@ namespace QRCoder
     public sealed class QRCodeGenerator
     {
         public enum ECCLevel { Q }
-        public object CreateQrCode(string location, ECCLevel level) => new object();
+        public static string LastLocation;
+        public object CreateQrCode(string location, ECCLevel level) { LastLocation=location; return new object(); }
     }
     public sealed class PngByteQRCode
     {
@@ -168,15 +169,17 @@ namespace MajdataPlay.Net
         public static HttpStatusCode CheckStatus=HttpStatusCode.Accepted;
         public static TaskCompletionSource<bool> DelayRequest;
         public static TaskCompletionSource<HttpStatusCode> DelayCheck;
+        public static string FailRequestHost;
         public static bool IsMachineRegistered(ApiEndpoint endpoint)=>true;
         public static ValueTask<EndpointResponse> RegisterAsync(ApiEndpoint endpoint,object machine,CancellationToken token)=>
             ValueTask.FromResult(new EndpointResponse());
         public static async ValueTask<EndpointResponse> AuthRequestAsync(ApiEndpoint endpoint,CancellationToken token)
         {
             var id=Interlocked.Increment(ref Requests);
+            if(endpoint.Url.Host==FailRequestHost) throw new InvalidOperationException("simulated_auth_request_failure");
             if(DelayRequest!=null) await DelayRequest.Task;
             return new EndpointResponse {StatusCode=HttpStatusCode.Created,Json="{\"RequestId\":\"fake-"+id+"\"}",
-                Headers=new(){["location"]=new[]{"https://login.example/machine/authorize?auth-id=fake-"+id}}};
+                Headers=new(){["location"]=new[]{endpoint.Url.GetLeftPart(UriPartial.Authority)+"/machine/authorize?auth-id=fake-"+id}}};
         }
         public static async ValueTask<EndpointResponse> AuthCheckAsync(ApiEndpoint endpoint,string id,CancellationToken token)
         {
@@ -200,8 +203,10 @@ namespace MajdataPlay
     public static class MajEnv
     {
         public static Net.ApiEndpoint[] ApiEndpoints=[];
+        public static TestSettings Settings=new();
         public static object MachineInfo=new();
     }
+    public sealed class TestSettings { public MajdataPlay.Scenes.Login.Pn532NfcOptions NFC {get;set;}=new(); }
     public static class MajTimeline { public static double UnscaledDeltaTime=>1; }
     public static class ScoreManager { public static void LoadOnlineScores(Net.MajNetAccountSongScore[] scores) { } }
     public static class MajInstances { public static SceneSwitcher SceneSwitcher=new(); }

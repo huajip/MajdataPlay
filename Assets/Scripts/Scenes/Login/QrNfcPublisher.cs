@@ -12,8 +12,6 @@ namespace MajdataPlay.Scenes.Login
         readonly object _gate = new object();
         readonly Func<CancellationToken, IPn532Port> _open;
         readonly Func<DateTime> _now;
-        readonly string _host;
-        readonly string _path;
         Task _worker = Task.CompletedTask;
         TaskCompletionSource<bool> _prepared = new TaskCompletionSource<bool>();
         CancellationTokenSource _stop;
@@ -26,27 +24,38 @@ namespace MajdataPlay.Scenes.Login
         DateTime _checkStarted;
         bool _faulted;
         bool _disposed;
+        internal Action<string> Diagnostic;
+        void Report(string code) { try { Diagnostic?.Invoke(code); } catch { } }
 
-        public static QrNfcPublisher CreateFromEnvironment()
+        public static QrNfcPublisher CreateConfigured()
         {
             try
             {
-                if (Environment.GetEnvironmentVariable("MAJ_PN532_NFC") != "1" ||
-                    Environment.OSVersion.Platform != PlatformID.Win32NT) return null;
-                var port = Environment.GetEnvironmentVariable("MAJ_PN532_PORT");
-                if (!Pn532NativeCdc.IsPortName(port)) return null;
-                var host = Environment.GetEnvironmentVariable("MAJ_PN532_AUTH_HOST") ?? "majdata.net";
-                return new QrNfcPublisher(token => new Pn532NativeCdc(port, token), null, host, "/qrauth");
+                if (Environment.OSVersion.Platform != PlatformID.Win32NT) return null;
+                if (Environment.GetEnvironmentVariable("MAJ_PN532_NFC") == "0" ||
+                    string.Equals(Environment.GetEnvironmentVariable("MAJ_PN532_NFC"), "false", StringComparison.OrdinalIgnoreCase)) return null;
+                var config = Pn532NfcConfiguration.Load();
+                if (!Pn532NfcConfiguration.Enabled(config.Options, Environment.GetEnvironmentVariable("MAJ_PN532_NFC"))) return null;
+                var configured = Environment.GetEnvironmentVariable("MAJ_PN532_PORT") ?? config.Options.Port;
+                var explicitPort = Pn532NfcConfiguration.ResolvePort(configured, null);
+                if (!string.IsNullOrWhiteSpace(configured) && explicitPort == null) return null;
+                var publisher = new QrNfcPublisher(token =>
+                {
+                    // Re-enumerate only when a new QR starts, so a refreshed QR
+                    // can recover after hotplug without probing arbitrary COM ports.
+                    var port = explicitPort ?? Pn532NfcConfiguration.ResolvePort(null, Pn532CdcDiscovery.PresentHinataPorts());
+                    if (port == null) throw new InvalidOperationException("pn532_cdc_unavailable_or_ambiguous");
+                    return new Pn532NativeCdc(port, token);
+                }, null);
+                return publisher;
             }
             catch { return null; }
         }
 
-        internal QrNfcPublisher(Func<CancellationToken, IPn532Port> open, Func<DateTime> now,
-            string host = "majdata.net", string path = "/qrauth")
+        internal QrNfcPublisher(Func<CancellationToken, IPn532Port> open, Func<DateTime> now)
         {
-            if (open == null || Uri.CheckHostName(host) != UriHostNameType.Dns ||
-                host.Contains("*") || !path.StartsWith("/", StringComparison.Ordinal)) throw new ArgumentException();
-            _open = open; _host = host.ToLowerInvariant(); _path = path;
+            if (open == null) throw new ArgumentNullException(nameof(open));
+            _open = open;
             var origin = DateTime.UtcNow;
             var elapsed = Stopwatch.StartNew();
             _now = now ?? (() => origin + elapsed.Elapsed);
@@ -55,14 +64,11 @@ namespace MajdataPlay.Scenes.Login
         {
             if (location == null || location.Length > 2048 || location.IndexOf('\\') >= 0) return false;
             foreach (var c in location) if (char.IsControl(c)) return false;
-            if (!Uri.TryCreate(location, UriKind.Absolute, out var uri) || uri.Scheme != "https" ||
-                uri.IdnHost != _host || uri.Port != 443 || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0 ||
-                uri.AbsolutePath != _path || !uri.Query.StartsWith("?auth-id=", StringComparison.Ordinal)) return false;
-            var value = uri.Query.Substring(9);
-            if (value.Length == 0 || value.Length > 1024) return false;
-            foreach (var c in value) if (!(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
-                c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' || c == '~')) return false;
-            return true;
+            // Only LoginManager's successfully displayed server Location reaches
+            // this internal publisher. Preserve the same URL without a second
+            // domain/path policy or changing its authorization token.
+            return Uri.TryCreate(location, UriKind.Absolute, out var uri) &&
+                (uri.Scheme == "https" || uri.Scheme == "http") && uri.Host.Length != 0 && uri.UserInfo.Length == 0;
         }
         public void Publish(string location)
         {
@@ -70,7 +76,8 @@ namespace MajdataPlay.Scenes.Login
             {
                 if (_disposed) return;
                 ClearLocked();
-                if (!Allows(location)) return;
+                if (!Allows(location)) { Report("qr_url_rejected"); return; }
+                Report("qr_url_accepted");
                 _location = location;
                 _expiry = _now().AddSeconds(8);
                 StartLocked();
@@ -133,12 +140,17 @@ namespace MajdataPlay.Scenes.Login
                     }
                     if (!IsLive(generation)) return;
                     using (var port = _open(stop.Token))
-                        Pn532CdcDriver.Run(port, ndef, () => IsLive(generation), stop.Token, () => ready.TrySetResult(true));
+                    {
+                        Report("cdc_port_opened");
+                        Pn532CdcDriver.Run(port, ndef, () => IsLive(generation), stop.Token,
+                            () => { ready.TrySetResult(true); Report("cdc_target_armed"); }, Report);
+                    }
                 }
                 catch (OperationCanceledException) { }
-                catch
+                catch (Exception error)
                 {
                     lock (_gate) if (generation == _generation) _faulted = true;
+                    Report("cdc_worker_fault_" + error.GetType().Name.ToLowerInvariant());
                 }
                 finally
                 {
@@ -146,6 +158,7 @@ namespace MajdataPlay.Scenes.Login
                     Array.Clear(ndef, 0, ndef.Length);
                     ready.TrySetResult(false);
                     stop.Dispose();
+                    Report("cdc_worker_closed");
                 }
             });
         }

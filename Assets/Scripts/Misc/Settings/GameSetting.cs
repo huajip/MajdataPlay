@@ -27,6 +27,8 @@ namespace MajdataPlay.Settings
         public OnlineOptions Online { get; init; } = new();
         [HideInSettingUI]
         public IOOptions IO { get; init; } = new();
+        [HideInSettingUI]
+        public MajdataPlay.Scenes.Login.Pn532NfcOptions NFC { get; set; } = new();
     }
     
     public class GameOptions

@@ -70,7 +70,9 @@ namespace MajdataPlay.Scenes.Login
 
         void Awake()
         {
-            _nfcPublisher = QrNfcPublisher.CreateFromEnvironment();
+            _nfcPublisher = QrNfcPublisher.CreateConfigured();
+            if (_nfcPublisher != null && (MajEnv.Settings?.NFC?.Diagnostics ?? true))
+                _nfcPublisher.Diagnostic = code => MajDebug.LogInfo("[MajNfc] " + code);
             _apiEndpoints = MajEnv.ApiEndpoints;
             _qrCodeRawImage = _qrCodeComponent.GetComponent<RawImage>();
             using var rentedApiEndpoints = new PooledList<ApiEndpoint>();

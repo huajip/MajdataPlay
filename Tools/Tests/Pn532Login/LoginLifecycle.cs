@@ -18,11 +18,12 @@ static class LoginLifecycle
         public Task Process;
         public FakeClock Clock;
     }
-    static async Task<RunState> Start(bool delay = false)
+    static async Task<RunState> Start(bool delay = false, ApiEndpoint[] endpoints = null, string failRequestHost = null)
     {
         Online.Requests = Online.Revokes = Online.Checks = 0;
         Online.CheckStatus = HttpStatusCode.Accepted;
         Online.DelayCheck = null;
+        Online.FailRequestHost = failRequestHost;
         Online.DelayRequest = delay ? new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously) : null;
         InputManager.Refresh = InputManager.Cancel = InputManager.PlainLogin = 0;
         var state = new RunState { Ports = new FakePorts(), Clock = new FakeClock(), Manager = new LoginManager() };
@@ -30,7 +31,7 @@ static class LoginLifecycle
         foreach (var field in typeof(LoginManager).GetFields(Fields))
             if (field.GetCustomAttribute<SerializeField>() != null) field.SetValue(state.Manager, Activator.CreateInstance(field.FieldType));
         typeof(LoginManager).GetField("_qrCodeRawImage", Fields).SetValue(state.Manager, new UnityEngine.UI.RawImage());
-        typeof(LoginManager).GetField("_enabledEndpoints", Fields).SetValue(state.Manager, new[] { new ApiEndpoint() });
+        typeof(LoginManager).GetField("_enabledEndpoints", Fields).SetValue(state.Manager, endpoints ?? new[] { new ApiEndpoint() });
         typeof(LoginManager).GetField("_nfcPublisher", Fields).SetValue(state.Manager, state.Publisher);
         state.Process = ((UniTaskVoid)Invoke(state.Manager, "LoginProcessor")).AsTask();
         if (!delay)
@@ -49,6 +50,27 @@ static class LoginLifecycle
     }
     public static async Task Run(Action<bool, string> check)
     {
+        var servers = await Start(endpoints:new[]{new ApiEndpoint(),new ApiEndpoint{Url=new Uri("https://second.example/api/")},new ApiEndpoint()});
+        var firstReader=servers.Ports.Last;
+        InputManager.Cancel=1;
+        await Tests.Until(()=>servers.Ports.Opened.Count==2);await servers.Publisher.WhenPreparedAsync();
+        var secondLocation=(string)typeof(QrNfcPublisher).GetField("_location",Fields).GetValue(servers.Publisher);
+        check(firstReader.Closed && secondLocation.StartsWith("https://second.example/") && secondLocation==QRCoder.QRCodeGenerator.LastLocation,
+            "LoginManager switches to the second server's exact displayed URL and clears the first payload");
+        var secondReader=servers.Ports.Last;InputManager.Cancel=1;
+        await Tests.Until(()=>servers.Ports.Opened.Count==3);await servers.Publisher.WhenPreparedAsync();
+        var returnLocation=(string)typeof(QrNfcPublisher).GetField("_location",Fields).GetValue(servers.Publisher);
+        check(secondReader.Closed && returnLocation.StartsWith("https://login.example/") && returnLocation==QRCoder.QRCodeGenerator.LastLocation && servers.Ports.Maximum==1,
+            "LoginManager switches back with a fresh matching URL and only one reader owner");
+        await Stop(servers);
+
+        var failedSecond = await Start(endpoints:new[]{new ApiEndpoint(),new ApiEndpoint{Url=new Uri("https://second.example/api/")}},failRequestHost:"second.example");
+        var previousPayload=failedSecond.Ports.Last;InputManager.Cancel=1;
+        await Tests.Until(()=>Online.Requests==2);await failedSecond.Publisher.WhenIdleAsync();
+        check(previousPayload.Closed && failedSecond.Ports.Active==0 && failedSecond.Ports.Opened.Count==1,
+            "LoginManager failed second-server authorization request leaves no previous-server payload active");
+        await Stop(failedSecond);
+
         var manual = await Start();
         check(Online.Requests == 1 && manual.Ports.Active == 1, "LoginManager publishes server Location after creating the QR texture");
         var old = manual.Ports.Last;
