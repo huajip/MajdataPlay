@@ -112,10 +112,12 @@ namespace MajdataPlay.Net
             await UniTask.SwitchToThreadPool();
             var statistic = GetApiEndpointStatistic(apiEndpoint);
             var rsp = await GetUserInfoAsyncInternal(apiEndpoint, token);
+            token.ThrowIfCancellationRequested();
             if (rsp.StatusCode is HttpStatusCode.Unauthorized)
             {
                 using (await statistic.LockAsync())
                 {
+                    token.ThrowIfCancellationRequested();
                     statistic.IsUserLoggedIn = false;
                 }
             }
@@ -123,6 +125,7 @@ namespace MajdataPlay.Net
             {
                 using (await statistic.LockAsync())
                 {
+                    token.ThrowIfCancellationRequested();
                     statistic.IsUserLoggedIn = true;
                 }
             }

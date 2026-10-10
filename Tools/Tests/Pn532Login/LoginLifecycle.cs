@@ -21,6 +21,9 @@ static class LoginLifecycle
     static async Task<RunState> Start(bool delay = false, ApiEndpoint[] endpoints = null, string failRequestHost = null)
     {
         Online.Requests = Online.Revokes = Online.Checks = 0;
+        Online.UserInfoCalls = Online.ScoreCalls = Online.AvatarCalls = 0;
+        Online.DelayUserInfo = null; Online.DelayAvatar = null; Online.ReturnNamedUser = false;
+        MajdataPlay.ScoreManager.Loads = 0;
         Online.CheckStatus = HttpStatusCode.Accepted;
         Online.DelayCheck = null;
         Online.FailRequestHost = failRequestHost;
@@ -121,6 +124,9 @@ static class LoginLifecycle
         await approved.Process.WaitAsync(TimeSpan.FromSeconds(3));
         await approved.Publisher.WhenIdleAsync();
         check(approved.Ports.Active == 0, "LoginManager normal authorization success releases NFC");
+        Invoke(approved.Manager,"OnDisable"); Invoke(approved.Manager,"OnDestroy"); Invoke(approved.Manager,"OnApplicationQuit");
+        check(Online.Revokes == 0 && MajdataPlay.ScoreManager.Loads == 1,
+            "accepted QR login retains the issued session through normal scene teardown");
         approved.Publisher.DisposeAndFlush();
 
         var plain = await Start(); InputManager.PlainLogin = 1;
@@ -140,12 +146,49 @@ static class LoginLifecycle
             var teardown = await Start(); Invoke(teardown.Manager, callback);
             await teardown.Publisher.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(3));
             check(teardown.Ports.Active == 0, "LoginManager " + callback + " releases NFC");
+            check(((UnityEngine.UI.RawImage)typeof(LoginManager).GetField("_qrCodeRawImage",Fields).GetValue(teardown.Manager)).texture==null,
+                "LoginManager " + callback + " removes the old displayed QR texture");
+            await teardown.Process.WaitAsync(TimeSpan.FromSeconds(3));
+            Invoke(teardown.Manager,"OnDisable"); Invoke(teardown.Manager,"OnDestroy"); Invoke(teardown.Manager,"OnApplicationQuit");
+            check(Online.Revokes == 1 && Online.Requests == 1,
+                "LoginManager " + callback + " revokes once and stops polling/requesting across repeated teardown");
             await Stop(teardown);
         }
         var late = await Start(true);
         Invoke(late.Manager, "OnDisable"); Online.DelayRequest.SetResult(true);
         await Task.Delay(30);
         check(late.Ports.Opened.Count == 0, "LoginManager late authorization response after leaving the page cannot reopen NFC");
+        await Tests.Until(()=>Online.Revokes==1);
+        check(Online.Revokes == 1 && Online.UserInfoCalls == 0,
+            "late QR registration after scene exit revokes the returned ticket without accepting it");
         await Stop(late);
+
+        var lateCheck = await Start();
+        var checkResponse = Online.DelayCheck = new TaskCompletionSource<HttpStatusCode>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await Tests.Until(()=>Online.Checks>0);
+        Invoke(lateCheck.Manager,"OnDisable"); checkResponse.SetResult(HttpStatusCode.OK);
+        await lateCheck.Process.WaitAsync(TimeSpan.FromSeconds(3));
+        check(Online.Revokes==1 && Online.UserInfoCalls==0 && MajdataPlay.ScoreManager.Loads==0,
+            "late successful poll after exit cannot fetch a user or import scores");
+        await Stop(lateCheck);
+
+        var lateUser = await Start();
+        var userResponse = Online.DelayUserInfo = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Online.CheckStatus=HttpStatusCode.OK; await Tests.Until(()=>Online.UserInfoCalls>0);
+        Invoke(lateUser.Manager,"OnDisable"); userResponse.SetResult(true);
+        await lateUser.Process.WaitAsync(TimeSpan.FromSeconds(3)); await Task.Delay(20);
+        check(Online.Revokes==1 && Online.ScoreCalls==0 && MajdataPlay.ScoreManager.Loads==0,
+            "late user-info response after exit cannot fetch/import scores or retain its QR session");
+        await Stop(lateUser);
+
+        var lateAvatar = await Start();
+        var avatarResponse = Online.DelayAvatar = new TaskCompletionSource<UnityEngine.Sprite>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Online.ReturnNamedUser=true; Online.CheckStatus=HttpStatusCode.OK; await Tests.Until(()=>Online.AvatarCalls>0);
+        Invoke(lateAvatar.Manager,"OnDisable"); avatarResponse.SetResult(new UnityEngine.Sprite());
+        await lateAvatar.Process.WaitAsync(TimeSpan.FromSeconds(3));
+        var endpoint=((ApiEndpoint[])typeof(LoginManager).GetField("_enabledEndpoints",Fields).GetValue(lateAvatar.Manager))[0];
+        check(Online.Revokes==1 && endpoint.RuntimeConfig.Username==null && MajdataPlay.ScoreManager.Loads==0,
+            "late avatar response cannot update account identity or import scores after exit");
+        await Stop(lateAvatar);
     }
 }

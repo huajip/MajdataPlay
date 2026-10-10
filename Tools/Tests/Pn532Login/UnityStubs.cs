@@ -161,11 +161,15 @@ namespace MajdataPlay.Net
     public class UserResponse
     {
         public bool TryDeserialize(out UserSummary? summary,out Exception exception)
-        { summary=null; exception=null; return true; }
+        { summary=Online.ReturnNamedUser ? new UserSummary { Username="synthetic-user" } : null; exception=null; return true; }
     }
     public static class Online
     {
         public static int Requests,Revokes,Checks;
+        public static int UserInfoCalls,ScoreCalls,AvatarCalls;
+        public static TaskCompletionSource<bool> DelayUserInfo;
+        public static TaskCompletionSource<UnityEngine.Sprite> DelayAvatar;
+        public static bool ReturnNamedUser;
         public static HttpStatusCode CheckStatus=HttpStatusCode.Accepted;
         public static TaskCompletionSource<bool> DelayRequest;
         public static TaskCompletionSource<HttpStatusCode> DelayCheck;
@@ -188,13 +192,16 @@ namespace MajdataPlay.Net
             var status = delayed == null ? CheckStatus : await delayed.Task;
             return new EndpointResponse {StatusCode=status};
         }
-        public static ValueTask<EndpointResponse> AuthRevokeAsync(ApiEndpoint endpoint,string id)
+        public static ValueTask<EndpointResponse> AuthRevokeAsync(ApiEndpoint endpoint,string id,CancellationToken token=default)
         { Interlocked.Increment(ref Revokes);return ValueTask.FromResult(new EndpointResponse()); }
         public static ValueTask<EndpointResponse> LoginAsync(ApiEndpoint endpoint,string username,string password)=>
             ValueTask.FromResult(new EndpointResponse {StatusCode=HttpStatusCode.OK});
-        public static ValueTask<UserResponse> GetUserInfoAsync(ApiEndpoint endpoint,CancellationToken token)=>ValueTask.FromResult(new UserResponse());
-        public static ValueTask<MajNetAccountSongScore[]> GetUserScoresAsync(ApiEndpoint endpoint,CancellationToken token)=>ValueTask.FromResult(Array.Empty<MajNetAccountSongScore>());
-        public static ValueTask<UnityEngine.Sprite> GetUserIconAsync(ApiEndpoint endpoint,string name,Action<string,bool> onError)=>ValueTask.FromResult<UnityEngine.Sprite>(null);
+        public static async ValueTask<UserResponse> GetUserInfoAsync(ApiEndpoint endpoint,CancellationToken token)
+        { Interlocked.Increment(ref UserInfoCalls); if(DelayUserInfo!=null) await DelayUserInfo.Task; return new UserResponse(); }
+        public static ValueTask<MajNetAccountSongScore[]> GetUserScoresAsync(ApiEndpoint endpoint,CancellationToken token)
+        { Interlocked.Increment(ref ScoreCalls); return ValueTask.FromResult(Array.Empty<MajNetAccountSongScore>()); }
+        public static async ValueTask<UnityEngine.Sprite> GetUserIconAsync(ApiEndpoint endpoint,string name,Action<string,bool> onError)
+        { Interlocked.Increment(ref AvatarCalls); return DelayAvatar==null ? null : await DelayAvatar.Task; }
     }
 }
 namespace MajdataPlay
@@ -208,7 +215,7 @@ namespace MajdataPlay
     }
     public sealed class TestSettings { public MajdataPlay.Scenes.Login.Pn532NfcOptions NFC {get;set;}=new(); }
     public static class MajTimeline { public static double UnscaledDeltaTime=>1; }
-    public static class ScoreManager { public static void LoadOnlineScores(Net.MajNetAccountSongScore[] scores) { } }
+    public static class ScoreManager { public static int Loads; public static void LoadOnlineScores(Net.MajNetAccountSongScore[] scores) { Interlocked.Increment(ref Loads); } }
     public static class MajInstances { public static SceneSwitcher SceneSwitcher=new(); }
     public class SceneSwitcher
     {

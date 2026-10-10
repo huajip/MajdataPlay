@@ -61,6 +61,69 @@ namespace MajdataPlay.Scenes.Login
         ApiEndpoint[] _apiEndpoints = Array.Empty<ApiEndpoint>();
         ApiEndpoint[] _enabledEndpoints = Array.Empty<ApiEndpoint>();
 
+        sealed class AuthAttempt
+        {
+            public readonly ApiEndpoint Endpoint;
+            public readonly CancellationTokenSource Cancellation = new();
+            public readonly CancellationToken Token;
+            public string RequestId = string.Empty;
+            public bool Retired;
+            public AuthAttempt(ApiEndpoint endpoint) { Endpoint = endpoint; Token = Cancellation.Token; }
+        }
+        readonly object _authGate = new();
+        readonly CancellationTokenSource _sceneCancellation = new();
+        AuthAttempt? _authAttempt;
+        bool _lifecycleClosed;
+
+        AuthAttempt BeginAuthAttempt(ApiEndpoint endpoint)
+        {
+            var attempt = new AuthAttempt(endpoint);
+            lock (_authGate) _authAttempt = attempt;
+            return attempt;
+        }
+        bool IsCurrent(AuthAttempt attempt)
+        {
+            lock (_authGate) return !_lifecycleClosed && !attempt.Retired && ReferenceEquals(_authAttempt, attempt);
+        }
+        void RetireAuthAttempt(AuthAttempt? attempt, bool accepted = false)
+        {
+            if (attempt is null) return;
+            string id;
+            lock (_authGate)
+            {
+                if (attempt.Retired) return;
+                attempt.Retired = true;
+                if (ReferenceEquals(_authAttempt, attempt)) _authAttempt = null;
+                id = accepted ? string.Empty : attempt.RequestId;
+            }
+            attempt.Cancellation.Cancel();
+            attempt.Cancellation.Dispose();
+            if (!string.IsNullOrEmpty(id)) RevokeRetiredAttemptAsync(attempt.Endpoint, id);
+        }
+        async void RevokeRetiredAttemptAsync(ApiEndpoint endpoint, string id)
+        {
+            try
+            {
+                using var timeout = new CancellationTokenSource(10000);
+                await RevokeAuthSession(endpoint, id, timeout.Token);
+            }
+            catch { MajDebug.LogError("Authorization session cleanup did not complete; server expiry remains the fallback"); }
+        }
+        async ValueTask<(string, AuthRequestResponse)> RegistryOwnedAuthSession(AuthAttempt attempt)
+        {
+            var response = await RegistryAuthSession(attempt.Endpoint, attempt.Token);
+            bool retired;
+            lock (_authGate)
+            {
+                retired = _lifecycleClosed || attempt.Retired || !ReferenceEquals(_authAttempt, attempt);
+                if (!retired) attempt.RequestId = response.Item2.RequestId;
+            }
+            // A request can complete after transport cancellation. Revoke the
+            // newly returned ticket instead of abandoning a live server QR.
+            if (retired) RevokeRetiredAttemptAsync(attempt.Endpoint, response.Item2.RequestId);
+            return response;
+        }
+
         QrNfcPublisher? _nfcPublisher;
         long _nfcCheckGeneration = -1;
         bool _isReady = false;
@@ -99,6 +162,16 @@ namespace MajdataPlay.Scenes.Login
         {
             _nfcPublisher?.DisposeAndFlush();
             _nfcPublisher = null;
+            if (_qrCodeRawImage != null) _qrCodeRawImage.texture = null!;
+            if (!_lifecycleClosed)
+            {
+                _lifecycleClosed = true;
+                _sceneCancellation.Cancel();
+                _sceneCancellation.Dispose();
+            }
+            _isExited = true;
+            _isReady = false;
+            RetireAuthAttempt(_authAttempt);
         }
         void OnDestroy() => OnDisable();
         void OnApplicationQuit() => OnDisable();
@@ -160,6 +233,7 @@ namespace MajdataPlay.Scenes.Login
             var sceneSwitcher = MajInstances.SceneSwitcher;
             for (var i = 0; i < _enabledEndpoints.Length; i++)
             {
+                if (_lifecycleClosed) return;
                 _nfcPublisher?.Clear();
                 var endpoint = _enabledEndpoints[i];
                 _loading.SetActive(false);
@@ -181,16 +255,18 @@ namespace MajdataPlay.Scenes.Login
                 _usernameInput.text = endpoint.RuntimeConfig.AuthUsername ?? string.Empty;
                 _passwordInput.text = endpoint.RuntimeConfig.AuthPassword ?? string.Empty;
                 await sceneSwitcher.FadeOutAsync();
+                if (_lifecycleClosed) return;
  
                 var authSessionTask = default(ValueTask<(string, AuthRequestResponse)>);
                 var authCheckTask = default(ValueTask<EndpointResponse>?);
                 var authProcessFlag = AUTH_FLAG_REQUESTING;
-                var cts = new CancellationTokenSource();
+                var attempt = BeginAuthAttempt(endpoint);
                 var authRequestId = string.Empty;
                 var authCheckCooldownSec = 2d;
-                authSessionTask = RegistryAuthSession(endpoint, cts.Token);
+                authSessionTask = RegistryOwnedAuthSession(attempt);
                 while (true)
                 {
+                    if (!IsCurrent(attempt)) return;
                     _isReady = true;
                     _usernameInput.readOnly = false;
                     _passwordInput.readOnly = false;
@@ -248,11 +324,13 @@ namespace MajdataPlay.Scenes.Login
                                         _loading.SetActive(true);
                                         _isReady = false;
                                         MajDebug.LogDebug("Checking login status");
-                                        var getUserInfoTask = FetchUserDataAsync(endpoint);
+                                        var getUserInfoTask = FetchUserDataAsync(endpoint, _sceneCancellation.Token);
                                         while(!getUserInfoTask.IsCompleted)
                                         {
+                                            if (!IsCurrent(attempt)) return;
                                             await UniTask.Yield();
                                         }
+                                        if (!IsCurrent(attempt)) return;
                                         MajDebug.LogInfo("Logged in");
                                         endpoint.RuntimeConfig.AuthMethod = NetAuthMethodOption.QRCode;
                                         var userInfo = (UserSummary?)null;
@@ -263,8 +341,10 @@ namespace MajdataPlay.Scenes.Login
                                             userInfo = userData.Summary;
                                             userScores = userData.Scores;
                                         }
-                                        ScoreManager.LoadOnlineScores(userScores);
                                         await UpdateApiEndpointRuntimeConfigAsync(endpoint, userInfo);
+                                        if (!IsCurrent(attempt)) return;
+                                        ScoreManager.LoadOnlineScores(userScores);
+                                        RetireAuthAttempt(attempt, accepted: true);
                                         break;
                                     }
                                     else if (rsp.StatusCode is HttpStatusCode.Accepted)
@@ -293,7 +373,7 @@ namespace MajdataPlay.Scenes.Login
                                 if(authCheckCooldownSec < 0)
                                 {
                                     _nfcCheckGeneration = _nfcPublisher?.BeginCheck() ?? -1;
-                                    authCheckTask = Online.AuthCheckAsync(endpoint, authRequestId, cts.Token);
+                                    authCheckTask = Online.AuthCheckAsync(endpoint, authRequestId, attempt.Token);
                                     authCheckCooldownSec = 2d;
                                     MajDebug.LogDebug("Checking the auth session");
                                 }
@@ -307,8 +387,8 @@ namespace MajdataPlay.Scenes.Login
                         if (isRefreshQRCodeRequested && authProcessFlag is (AUTH_FLAG_WAIT_FOR_PERMIT or AUTH_FLAG_ERROR))
                         {
                             _nfcPublisher?.Clear();
-                            cts.Cancel();
-                            cts = new();
+                            RetireAuthAttempt(attempt);
+                            attempt = BeginAuthAttempt(endpoint);
                             authProcessFlag = AUTH_FLAG_REQUESTING;
                             authCheckTask = null;
                             _nfcCheckGeneration = -1;
@@ -316,22 +396,19 @@ namespace MajdataPlay.Scenes.Login
                             _qrCodeLoading.SetActive(true);
                             _qrCodeRawImage.texture = null!;
                             _qrCodeRawImage.color = new Color(0.5f, 0.5f, 0.5f);
-                            if (!string.IsNullOrEmpty(authRequestId))
-                            {
-                                await RevokeAuthSession(endpoint, authRequestId);
-                            }
-                            authSessionTask = RegistryAuthSession(endpoint, cts.Token);
+                            authRequestId = string.Empty;
+                            authSessionTask = RegistryOwnedAuthSession(attempt);
                         }
                         //cancel button
                         if (InputManager.IsSensorClickCompletedInThisFrame(SensorArea.A5) ||
                             InputManager.IsButtonClickCompletedInThisFrame(ButtonZone.A5))
                         {
                             _nfcPublisher?.Clear();
-                            cts.Cancel();
+                            RetireAuthAttempt(attempt);
                             if (!string.IsNullOrEmpty(authRequestId))
                             {
                                 await sceneSwitcher.FadeInAsync();
-                                await RevokeAuthSession(endpoint, authRequestId);
+                                if (_lifecycleClosed) return;
                             }
                             _usernameInput.DeactivateInputField();
                             _passwordInput.DeactivateInputField();
@@ -361,8 +438,10 @@ namespace MajdataPlay.Scenes.Login
                             _loading.SetActive(true);
                             while (!task.IsCompleted)
                             {
+                                if (_lifecycleClosed) return;
                                 await UniTask.Yield();
                             }
+                            if (_lifecycleClosed) return;
                             _loading.SetActive(false);
                             if (!task.IsCompletedSuccessfully)
                             {
@@ -399,15 +478,14 @@ namespace MajdataPlay.Scenes.Login
                                 MajDebug.LogInfo("Logged in");
                                 Hint("MAJTEXT_LOGIN_LOGIN_SUCCESS".i18n(), false);
                                 _loading.SetActive(true);
-                                var getUserInfoTask = FetchUserDataAsync(endpoint);
-                                if (!string.IsNullOrEmpty(authRequestId))
-                                {
-                                    await RevokeAuthSession(endpoint, authRequestId);
-                                }
+                                var getUserInfoTask = FetchUserDataAsync(endpoint, _sceneCancellation.Token);
+                                RetireAuthAttempt(attempt);
                                 while(!getUserInfoTask.IsCompleted)
                                 {
+                                    if (_lifecycleClosed) return;
                                     await UniTask.Yield();
                                 }
+                                if (_lifecycleClosed) return;
                                 endpoint.RuntimeConfig.AuthMethod = NetAuthMethodOption.Plain;
                                 endpoint.RuntimeConfig.AuthUsername = username;
                                 endpoint.RuntimeConfig.AuthPassword = password;
@@ -418,10 +496,11 @@ namespace MajdataPlay.Scenes.Login
                                     userInfo = getUserInfoTask.Result.Summary;
                                     userScores = getUserInfoTask.Result.Scores;
                                 }
-                                ScoreManager.LoadOnlineScores(userScores);
                                 Hint();
                                 _loading.SetActive(false);
                                 await UpdateApiEndpointRuntimeConfigAsync(endpoint, userInfo);
+                                if (_lifecycleClosed) return;
+                                ScoreManager.LoadOnlineScores(userScores);
                                 break;
                             }
                         }
@@ -443,6 +522,11 @@ namespace MajdataPlay.Scenes.Login
                 return;
             }
             _nfcPublisher?.Clear();
+            if (_qrCodeRawImage != null) _qrCodeRawImage.texture = null!;
+            _lifecycleClosed = true;
+            _sceneCancellation.Cancel();
+            _sceneCancellation.Dispose();
+            RetireAuthAttempt(_authAttempt);
             _isExited = true;
             RefreshListBackgroundAsync(refreshWholeList:SceneSwitcher.LastScene != MajScenes.Title);
         }
@@ -494,6 +578,7 @@ namespace MajdataPlay.Scenes.Login
         async ValueTask<UserData> FetchUserDataAsync(ApiEndpoint endpoint, CancellationToken token = default)
         {
             var fetchUserInfoRsp = await Online.GetUserInfoAsync(endpoint, token);
+            token.ThrowIfCancellationRequested();
             var userScores = await Online.GetUserScoresAsync(endpoint, token);
             var userInfo = default(UserSummary?);
             if(fetchUserInfoRsp.TryDeserialize(out var userInfoOut, out var e))
@@ -514,6 +599,7 @@ namespace MajdataPlay.Scenes.Login
         }
         async UniTask UpdateApiEndpointRuntimeConfigAsync(ApiEndpoint endpoint, UserSummary? userInfo)
         {
+            if (_lifecycleClosed) return;
             var runtimeConfig = endpoint.RuntimeConfig;
             if (userInfo is not null)
             {
@@ -524,8 +610,10 @@ namespace MajdataPlay.Scenes.Login
                 var avatarTask = Online.GetUserIconAsync(endpoint, result.Username, onError: Hint);
                 while (!avatarTask.IsCompleted)
                 {
+                    if (_lifecycleClosed) return;
                     await UniTask.Yield();
                 }
+                if (_lifecycleClosed) return;
                 _loading.SetActive(false);
                 if (avatarTask.IsCompletedSuccessfully && avatarTask.Result is not null)
                 {
@@ -550,14 +638,19 @@ namespace MajdataPlay.Scenes.Login
         }
         async UniTask RevokeAuthSession(ApiEndpoint endpoint, string authId, CancellationToken token = default)
         {
-            var revokeTask = Online.AuthRevokeAsync(endpoint, authId);
+            var revokeTask = Online.AuthRevokeAsync(endpoint, authId, token);
             while (!revokeTask.IsCompleted)
             {
+                token.ThrowIfCancellationRequested();
                 await UniTask.Yield();
             }
-            if (revokeTask.IsCompletedSuccessfully)
+            if (revokeTask.IsCompletedSuccessfully && revokeTask.Result.IsSuccessfully)
             {
                 MajDebug.LogInfo("Successfully revoked the authorization session");
+            }
+            else if (revokeTask.IsCompletedSuccessfully)
+            {
+                MajDebug.LogError("Revoking the authorization session was rejected; server expiry remains the fallback");
             }
             else if (revokeTask.IsFaulted)
             {
