@@ -653,6 +653,33 @@ namespace MajdataPlay.Net
             return null;
         }
 
+        public static async ValueTask<MajNetOnlineDanInfo[]?> GetPublicChartCollectionsAsync(ApiEndpoint apiEndpoint, CancellationToken token = default)
+        {
+            if (!PublicChartCollections.IsApiRoot(apiEndpoint.Url)) return Array.Empty<MajNetOnlineDanInfo>();
+            await UniTask.SwitchToThreadPool();
+            token.ThrowIfCancellationRequested();
+            var capabilityResponse = await GetAsync(apiEndpoint.Url.Combine("maichart/capabilities"), token);
+            if (capabilityResponse.StatusCode == HttpStatusCode.NotFound ||
+                capabilityResponse.StatusCode == HttpStatusCode.Unauthorized ||
+                capabilityResponse.StatusCode == HttpStatusCode.Forbidden)
+                return Array.Empty<MajNetOnlineDanInfo>(); // No opt-in: keep the provider's private flow.
+            if (!capabilityResponse.IsSuccessfully) return null; // Keep old public folders on temporary failure.
+            if (!capabilityResponse.TryDeserialize<PublicCollectionCapability>(out var capability, out var capabilityError) ||
+                !PublicChartCollections.TryGetCollectionUri(apiEndpoint.Url, capability, out var url))
+                return Array.Empty<MajNetOnlineDanInfo>();
+            for (var i = 0; i < MajEnv.HTTP_REQUEST_MAX_RETRY; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                var rsp = await GetAsync(url, token);
+                if (rsp.IsSuccessfully && rsp.TryDeserialize<MajNetOnlineDanInfo[]>(out var rows, out var error) && rows is not null)
+                    return rows.Where(row => PublicChartCollections.IsSystemCollection(row.Id)).ToArray();
+                // Public metadata failure never mutates account login or score authorization.
+                if (rsp.ErrorCode == HttpErrorCode.Canceled || rsp.StatusCode == HttpStatusCode.Unauthorized ||
+                    (!rsp.IsSuccessfully && rsp.StatusCode != HttpStatusCode.OK)) break;
+            }
+            return null;
+        }
+
         public static async ValueTask<MajNetOnlineDanInfo[]?> GetUserOnlineFavCollection(ApiEndpoint apiEndpoint, CancellationToken token = default)
         {
             await UniTask.SwitchToThreadPool();

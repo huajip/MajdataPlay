@@ -282,15 +282,16 @@ namespace MajdataPlay
                 return true;
             }
             var isSuccessful = true;
-            using var collections = new PooledList<SongCollection>(Collections);
+            var collections = new List<SongCollection>(Collections);
             for (var i = 0; i < collections.Count; i++)
             {
                 var collection = collections[i];
-                if(collection.IsOnline && collection.Type is ChartStorageType.PlayList)
+                if(collection.IsOnline && collection.Type is ChartStorageType.PlayList && !IsKnownPublicCollection(collection))
                 {
                     collections.RemoveAt(i--);
                 }
             }
+            isSuccessful = await AppendPublicOnlineCollectionsAsync(collections, progressReporter);
             foreach (var api in MajEnv.ApiEndpoints.OrderBy(x => x.Name))
             {
                 if (api is null)
@@ -322,7 +323,7 @@ namespace MajdataPlay
                             var collection = await GetOnlineDanCollectionAsync(_allCharts, dan, api);
                             if (collection is not null)
                             {
-                                collections.Add(collection);
+                                AddOnlineCollectionIfMissing(collections, collection);
                             }
                         }
                     }
@@ -499,8 +500,61 @@ namespace MajdataPlay
                     MajDebug.LogInfo("Loaded Dan:" + collection.DanInfo?.Name ?? collection.Name);
                 }
             }
+            if (MajEnv.Settings.Online.Enable)
+                await AppendPublicOnlineCollectionsAsync(collections, null);
             return collections.ToArray();
         }
+        static readonly Dictionary<ApiEndpoint, HashSet<Guid>> _publicOnlineCollectionIds = new();
+
+        private static bool IsKnownPublicCollection(SongCollection collection) =>
+            collection is OnlineSongCollection online &&
+            _publicOnlineCollectionIds.TryGetValue(online.Source, out var ids) && ids.Contains(online.Id);
+
+        private static void AddOnlineCollectionIfMissing(List<SongCollection> collections, SongCollection collection)
+        {
+            if (collection is OnlineSongCollection online && collections.Any(existing =>
+                existing is OnlineSongCollection other && other.Source == online.Source && other.Id == online.Id))
+                return;
+            collections.Add(collection);
+        }
+
+        private static async Task<bool> AppendPublicOnlineCollectionsAsync(List<SongCollection> collections, IProgress<string>? progressReporter)
+        {
+            var successful = true;
+            foreach (var api in MajEnv.ApiEndpoints.OrderBy(x => x.Name))
+            {
+                if (api is null || string.IsNullOrEmpty(api.Name) || !PublicChartCollections.IsApiRoot(api.Url))
+                    continue;
+                try
+                {
+                    var rows = await Online.GetPublicChartCollectionsAsync(api);
+                    if (rows is null)
+                    {
+                        successful = false;
+                        continue; // Keep previously loaded public folders on transient failure.
+                    }
+                    var loaded = new List<SongCollection>();
+                    var sourceCharts = _allCharts.Where(chart => chart is not OnlineSongDetail online || online.ServerInfo == api).ToArray();
+                    foreach (var row in rows)
+                    {
+                        if (!PublicChartCollections.IsSystemCollection(row.Id)) continue;
+                        var collection = await GetOnlineDanCollectionAsync(sourceCharts, row, api);
+                        if (collection is not null) AddOnlineCollectionIfMissing(loaded, collection);
+                    }
+                    collections.RemoveAll(existing => existing is OnlineSongCollection online &&
+                        online.Source == api && IsKnownPublicCollection(existing));
+                    foreach (var collection in loaded) AddOnlineCollectionIfMissing(collections, collection);
+                    _publicOnlineCollectionIds[api] = new HashSet<Guid>(loaded.Select(collection => collection.Id));
+                }
+                catch (Exception e)
+                {
+                    successful = false;
+                    MajDebug.LogError("[Online]Fetching public chart collections failed: " + e.GetType().Name);
+                }
+            }
+            return successful;
+        }
+
         //scan one folder
         private static async Task<SongCollection> GetCollection(string rootPath)
         {
