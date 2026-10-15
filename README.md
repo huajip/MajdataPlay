@@ -112,6 +112,9 @@ Install this version using Unity Hub.
 
 [Docs](https://docs.majdata.net) | [WIKI](https://github.com/LingFeng-bbben/MajdataPlay/wiki)
 
+[PN532 tap-to-login](Tools/PN532-Login.md): setup and troubleshooting for this fork.
+The upstream builds linked below do not include this feature.
+
 ## Releases
 
 [Stable](https://github.com/TeamMajdata/MajdataPlay_Build) | [Nightly](https://github.com/LingFeng-bbben/MajdataPlay/releases/tag/nightly)

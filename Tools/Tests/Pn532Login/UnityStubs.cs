@@ -105,10 +105,12 @@ namespace MajdataPlay.Diagnostics
 {
     public static class MajDebug
     {
+        public static readonly System.Collections.Concurrent.ConcurrentQueue<string> InfoMessages = new();
+        public static readonly System.Collections.Concurrent.ConcurrentQueue<string> ErrorMessages = new();
         public static void LogException(Exception exception) { }
-        public static void LogError(object text) { }
+        public static void LogError(object text) { ErrorMessages.Enqueue(text.ToString()); }
         public static void LogDebug(object text) { }
-        public static void LogInfo(object text) { }
+        public static void LogInfo(object text) { InfoMessages.Enqueue(text.ToString()); }
     }
 }
 namespace MajdataPlay.IO
@@ -166,6 +168,8 @@ namespace MajdataPlay.Net
     public static class Online
     {
         public static int Requests,Revokes,Checks;
+        public static bool RevokeSuccessfully = true;
+        public static CancellationToken LastRevokeToken;
         public static HttpStatusCode CheckStatus=HttpStatusCode.Accepted;
         public static TaskCompletionSource<bool> DelayRequest;
         public static TaskCompletionSource<HttpStatusCode> DelayCheck;
@@ -188,8 +192,13 @@ namespace MajdataPlay.Net
             var status = delayed == null ? CheckStatus : await delayed.Task;
             return new EndpointResponse {StatusCode=status};
         }
-        public static ValueTask<EndpointResponse> AuthRevokeAsync(ApiEndpoint endpoint,string id)
-        { Interlocked.Increment(ref Revokes);return ValueTask.FromResult(new EndpointResponse()); }
+        public static ValueTask<EndpointResponse> AuthRevokeAsync(ApiEndpoint endpoint,string id,CancellationToken token=default)
+        {
+            LastRevokeToken = token;
+            Interlocked.Increment(ref Revokes);
+            return ValueTask.FromResult(new EndpointResponse { IsSuccessfully = RevokeSuccessfully,
+                StatusCode = RevokeSuccessfully ? HttpStatusCode.OK : HttpStatusCode.ServiceUnavailable });
+        }
         public static ValueTask<EndpointResponse> LoginAsync(ApiEndpoint endpoint,string username,string password)=>
             ValueTask.FromResult(new EndpointResponse {StatusCode=HttpStatusCode.OK});
         public static ValueTask<UserResponse> GetUserInfoAsync(ApiEndpoint endpoint,CancellationToken token)=>ValueTask.FromResult(new UserResponse());

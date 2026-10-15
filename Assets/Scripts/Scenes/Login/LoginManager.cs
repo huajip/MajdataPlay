@@ -550,14 +550,19 @@ namespace MajdataPlay.Scenes.Login
         }
         async UniTask RevokeAuthSession(ApiEndpoint endpoint, string authId, CancellationToken token = default)
         {
-            var revokeTask = Online.AuthRevokeAsync(endpoint, authId);
+            var revokeTask = Online.AuthRevokeAsync(endpoint, authId, token);
             while (!revokeTask.IsCompleted)
             {
+                token.ThrowIfCancellationRequested();
                 await UniTask.Yield();
             }
-            if (revokeTask.IsCompletedSuccessfully)
+            if (revokeTask.IsCompletedSuccessfully && revokeTask.Result.IsSuccessfully)
             {
                 MajDebug.LogInfo("Successfully revoked the authorization session");
+            }
+            else if (revokeTask.IsCompletedSuccessfully)
+            {
+                MajDebug.LogError("Revoking the authorization session was rejected; server expiry remains the fallback");
             }
             else if (revokeTask.IsFaulted)
             {

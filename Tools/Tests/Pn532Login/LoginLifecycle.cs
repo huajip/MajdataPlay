@@ -50,6 +50,21 @@ static class LoginLifecycle
     }
     public static async Task Run(Action<bool, string> check)
     {
+        using (var cleanupCancellation = new CancellationTokenSource())
+        {
+            MajdataPlay.Diagnostics.MajDebug.InfoMessages.Clear();
+            MajdataPlay.Diagnostics.MajDebug.ErrorMessages.Clear();
+            Online.RevokeSuccessfully = false;
+            var cleanup = (UniTask)typeof(LoginManager).GetMethod("RevokeAuthSession", Fields).Invoke(
+                new LoginManager(), new object[] { new ApiEndpoint(), "fake-rejected-revoke", cleanupCancellation.Token });
+            await cleanup;
+            check(!MajdataPlay.Diagnostics.MajDebug.InfoMessages.Any(x => x.Contains("Successfully revoked")) &&
+                MajdataPlay.Diagnostics.MajDebug.ErrorMessages.Any(x => x.Contains("rejected")),
+                "rejected server revocation is reported as a failure, not successful ticket invalidation");
+            check(Online.LastRevokeToken == cleanupCancellation.Token,
+                "revocation forwards its cleanup cancellation token to the network operation");
+            Online.RevokeSuccessfully = true;
+        }
         var servers = await Start(endpoints:new[]{new ApiEndpoint(),new ApiEndpoint{Url=new Uri("https://second.example/api/")},new ApiEndpoint()});
         var firstReader=servers.Ports.Last;
         InputManager.Cancel=1;
